@@ -15,9 +15,9 @@ a single IP) and does two passes:
  Each host is classified into a device type (camera / dvr-nvr) with a vendor
  guess, a confidence level, and the concrete evidence behind the call.
 
- A host is also flagged as surveillance if BOTH port 80 and port 554 are open,
- even without any fingerprint evidence - this is the main classification
- trigger and catches devices whose banners were silenced or unknown.
+ The result is filtered to only show IPs that have BOTH port 80 AND port 554
+ open (the surveillance-device fingerprint), with or without a banner. This
+ catches devices whose banners are silenced or whose brand isn't recognized.
 
  Optional phase 3 (--check-creds) tests factory default credentials against
  the detected devices' web UIs (HTTP Basic/Digest), capped per host to limit
@@ -798,13 +798,24 @@ def main():
       prog2.update(1, extra=f"devices found: {detected_live}")
   prog2.finish(extra=f"devices found: {detected_live}")
 
-  # Only IPs positively identified as camera/DVR/NVR, at or above the
-  # requested confidence. Everything else is ignored.
+  # Final filter: only IPs with BOTH port 80 AND port 554 open are reported,
+  # with or without banner/fingerprint. This is the explicit surveillance
+  # signature the result is meant to surface.
   CONF_RANK = {"possible": 1, "likely": 2, "confirmed": 3}
   threshold = CONF_RANK[args.min_confidence]
   findings.sort(key=lambda r: ipaddress.ip_address(r["ip"]))
   detected = [f for f in findings
-        if f["device_type"] and CONF_RANK.get(f["confidence"], 0) >= threshold]
+        if 80 in f["open_ports"] and 554 in f["open_ports"]
+        and (not f["device_type"]
+             or CONF_RANK.get(f["confidence"], 0) >= threshold)]
+  # Make sure every reported host has a non-empty label even if classify()
+  # decided "not surveillance" (it won't, since 80+554 already triggers a
+  # label, but this is defensive against future signature tweaks).
+  for f in detected:
+    if not f.get("device_type"):
+      f["device_type"] = "DVR/NVR or camera"
+      f["confidence"] = "likely"
+      f["evidence"] = (f.get("evidence") or []) + ["ports:80+554"]
 
   # Phase 3 (opt-in): test factory default credentials on detected devices.
   if args.check_creds and detected:
