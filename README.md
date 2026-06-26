@@ -1,8 +1,10 @@
 # eyesharvester
 
-A defensive surveillance-device discovery tool. Given an IP range, it identifies
-exposed IP cameras, DVRs, and NVRs, then audits them for default credentials and
-known critical CVEs so you can patch, isolate, or replace vulnerable devices.
+A surveillance-device discovery tool for the **reconnaissance stage** of
+authorized security engagements (pentests, red-team ops, asset audits, CTF
+labs). Given an IP range, it identifies exposed IP cameras, DVRs, and NVRs,
+then optionally audits them for default credentials and known critical CVEs
+so owners can patch, isolate, or replace vulnerable devices.
 
 Single-file Python 3, standard library only, no dependencies.
 
@@ -69,6 +71,10 @@ To uninstall: `rm ~/.local/bin/eyesharvester` (or `/usr/local/bin/eyesharvester`
 - **Defensive hardening report** (`--harden`): maps the detected vendor to
   known critical CVEs (auth-bypass / RCE) with remediation guidance. No
   exploit code, identification only.
+- **Stealth mode** (`--stealth`): rate-limited, jittered, cross-host probe
+  order with a browser-like User-Agent and minimal probe paths. Reduces
+  rate-trigger noise during reconnaissance. (Not wire-stealth - still
+  TCP-connect; auth attempts still log on targets.)
 - **Live terminal UI**: progress bar (0-100%) per phase with a live counter of
   cameras found / devices identified / default creds cracked. Auto-disables
   when not a TTY so output piping stays clean.
@@ -106,6 +112,20 @@ eyesharvester 203.0.113.0/24 -q > cameras.txt
 
 ```bash
 eyesharvester 203.0.113.0/24 -c confirmed     # only rock-solid hits
+```
+
+### Stealth (low-and-slow recon)
+
+```bash
+eyesharvester 203.0.113.0/24 --stealth
+```
+
+Preset: 5 probes/s with ±40% jitter, 5 workers, 4s timeout, randomized
+host x port order, browser User-Agent, minimal probe paths. Override any of:
+
+```bash
+eyesharvester 203.0.113.0/24 --rate 2 --jitter 0.6 --shuffle \
+    --user-agent "Mozilla/5.0 ..."
 ```
 
 ### Default-credential audit
@@ -157,6 +177,11 @@ eyesharvester 203.0.113.0/24 --check-creds --harden -oJ audit.json
 | `--max-cred-tries N` | Max attempts per host (default 3 = lockout safe) |
 | `--cred-delay SECS` | Sleep between credential attempts |
 | `--harden` | Defensive CVE / hardening report |
+| `--stealth` | Low-and-slow preset (see Stealth section) |
+| `--rate N` | Cap probes per second (`--stealth` default: 5) |
+| `--jitter F` | Randomize timing by ±F (0..1) |
+| `--shuffle` | Randomize host x port order |
+| `--user-agent STR` | Custom HTTP/RTSP User-Agent |
 | `--no-progress` | Disable the live progress bar |
 | `--max-probes N` | Refuse scans larger than this without `-y` |
 | `-y, --yes` | Bypass `--max-probes` |
@@ -180,6 +205,32 @@ Confidence levels:
 - **confirmed** - vendor named, ONVIF responded, or DVRIP control port open
 - **likely** - RTSP speaker or known camera webserver banner (Boa, GoAhead, App-webs, uc-httpd, ...)
 - **possible** - any other positive signal
+
+---
+
+## Stealth mode
+
+`--stealth` is a low-and-slow recon preset that reduces rate-trigger noise
+during authorized engagements:
+
+| Setting | Default | Stealth |
+|---|---|---|
+| Probes per second | unlimited | 5 |
+| Timing jitter | 0 | ±40% |
+| Workers | 200 | 5 |
+| Timeout | 1.5s | 4.0s |
+| Probe order | host-major | port-major + shuffled |
+| HTTP paths | `/`, `/doc/page/login.asp`, `/cgi-bin/`, `/onvif/device_service` | `/` only |
+| User-Agent | `eyesharvester/1.0` | Chrome on Linux |
+
+**Stealth limits (read this):** still a full TCP-connect scanner, not wire
+stealth - a network IDS watching connection patterns will see you. SYN
+scanning needs raw sockets (use masscan/nmap as root for that). And
+`--check-creds` always produces failed-login entries on targets; stealth
+lowers concurrency but does not hide attempts.
+
+Granular flags let you mix-and-match (`--rate`, `--jitter`, `--shuffle`,
+`--user-agent`) instead of using the preset.
 
 ---
 
@@ -234,9 +285,9 @@ Default: human-readable report on stdout.
 
 ## Limitations
 
-- TCP-connect scanning is not stealthy and will appear in target logs. For
-  internet-scale ranges, use a SYN scanner (e.g. `masscan`) for discovery
-  first, then run `eyesharvester` on the live hosts.
+- TCP-connect scanning is not stealthy at the wire level and will appear in
+  target logs. For internet-scale ranges, use a SYN scanner (e.g. `masscan`)
+  for discovery first, then run `eyesharvester` on the live hosts.
 - Vendor / version extraction is heuristic and can be spoofed. Treat results
   as leads, not proof.
 - The CVE advisory table is at vendor granularity, not exact firmware. Verify
