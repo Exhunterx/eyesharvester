@@ -24,6 +24,7 @@ Examples:
  python3 eyesharvester.py 198.51.100.0/22 -w 500 -oJ cams.json
  python3 eyesharvester.py 203.0.113.7 -v         # show evidence
  python3 eyesharvester.py 203.0.113.0/24 --check-creds  # + default-cred audit
+ python3 eyesharvester.py 203.0.113.0/24 --stealth      # low-and-slow mode
 
 Heuristic, not authoritative - confirm before acting. Only scan hosts you
 own or are explicitly authorized to test.
@@ -32,6 +33,7 @@ own or are explicitly authorized to test.
 import argparse
 import ipaddress
 import json
+import random
 import re
 import shutil
 import socket
@@ -42,6 +44,41 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+
+# A common-looking browser UA used in --stealth so the tool stops self-identifying.
+STEALTH_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+DEFAULT_UA = "eyesharvester/1.0"
+
+# Probe paths used in normal mode. Stealth keeps only the bland root request.
+HTTP_PATHS_FULL = ["/", "/doc/page/login.asp", "/cgi-bin/", "/onvif/device_service"]
+HTTP_PATHS_STEALTH = ["/"]
+
+
+class RateLimiter:
+  """Simple thread-safe rate limiter: at most `rate` events per second,
+  with +/- jitter*100% randomness. Disabled if rate <= 0."""
+
+  def __init__(self, rate, jitter=0.0):
+    import threading
+    self.rate = float(rate or 0)
+    self.jitter = max(0.0, min(1.0, float(jitter or 0.0)))
+    self._next = 0.0
+    self._lock = threading.Lock()
+
+  def wait(self):
+    if self.rate <= 0:
+      return
+    interval = 1.0 / self.rate
+    if self.jitter:
+      interval *= 1.0 + random.uniform(-self.jitter, self.jitter)
+    with self._lock:
+      now = time.monotonic()
+      sleep_for = self._next - now
+      if sleep_for > 0:
+        time.sleep(sleep_for)
+        now = time.monotonic()
+      self._next = max(now, self._next) + interval
 
 
 class Progress:
@@ -152,8 +189,15 @@ TLS_PORTS = {443, 8443}
 RTSP_PORTS = {554, 8554}
 DVRIP_PORTS = {37777, 37778, 34567, 34599}
 
-# Login/probe paths that frequently reveal vendor on embedded web UIs.
-HTTP_PATHS = ["/", "/doc/page/login.asp", "/cgi-bin/", "/onvif/device_service"]
+# Default probe config. Overridden by main() based on flags. Mutated globally
+# so the existing probe signatures don't need an extra arg threaded through.
+class ProbeConfig:
+  user_agent = DEFAULT_UA
+  http_paths = HTTP_PATHS_FULL
+  stealth = False
+
+# Backwards-compatibility alias for downstream patches/readers.
+HTTP_PATHS = ProbeConfig.http_paths
 
 # Vendor signatures matched (case-insensitive) against collected evidence text
 # (status lines, headers, realms, body snippets). Patterns are substrings.
@@ -194,7 +238,7 @@ def http_probe(ip, port, timeout, use_tls):
   Returns a list of lowercase evidence strings (possibly empty).
   """
   evidence = []
-  scheme_paths = HTTP_PATHS if port in (80, 443, 8080, 8443, 8000) else ["/"]
+  scheme_paths = ProbeConfig.http_paths if port in (80, 443, 8080, 8443, 8000) else ["/"]
   for path in scheme_paths:
     raw = _http_get(ip, port, path, timeout, use_tls)
     if not raw:
@@ -238,7 +282,7 @@ def _http_get(ip, port, path, timeout, use_tls):
       sock = ctx.wrap_socket(sock, server_hostname=str(ip))
     sock.settimeout(timeout)
     req = (f"GET {path} HTTP/1.1\r\nHost: {ip}\r\n"
-        "User-Agent: eyesharvester/1.0\r\nAccept: */*\r\nConnection: close\r\n\r\n")
+        f"User-Agent: {ProbeConfig.user_agent}\r\nAccept: */*\r\nConnection: close\r\n\r\n")
     sock.sendall(req.encode())
     chunks = []
     total = 0
@@ -267,7 +311,7 @@ def rtsp_probe(ip, port, timeout):
     with socket.create_connection((str(ip), port), timeout=timeout) as s:
       s.settimeout(timeout)
       req = (f"OPTIONS rtsp://{ip}:{port}/ RTSP/1.0\r\n"
-          "CSeq: 1\r\nUser-Agent: eyesharvester\r\n\r\n")
+          f"CSeq: 1\r\nUser-Agent: {ProbeConfig.user_agent}\r\n\r\n")
       s.sendall(req.encode())
       data = s.recv(1024).decode("latin-1", "replace")
   except OSError:
@@ -410,7 +454,7 @@ def _web_target(open_ports):
 
 def _plain_status(url, timeout, ctx):
   """HTTP status of an unauthenticated GET, or None."""
-  req = urllib.request.Request(url, headers={"User-Agent": "eyesharvester/1.0"})
+  req = urllib.request.Request(url, headers={"User-Agent": ProbeConfig.user_agent})
   try:
     with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
       return r.getcode()
@@ -429,7 +473,7 @@ def _auth_get(url, user, pwd, timeout, ctx):
   if ctx is not None:
     handlers.append(urllib.request.HTTPSHandler(context=ctx))
   opener = urllib.request.build_opener(*handlers)
-  req = urllib.request.Request(url, headers={"User-Agent": "eyesharvester/1.0"})
+  req = urllib.request.Request(url, headers={"User-Agent": ProbeConfig.user_agent})
   try:
     with opener.open(req, timeout=timeout) as r:
       return r.getcode(), r.read(512)
@@ -722,7 +766,36 @@ def main():
   ap.add_argument("--no-progress", action="store_true",
           help="disable the live progress bar (auto-off when not a TTY)")
   ap.add_argument("-oJ", "--json-out", help="write results to a JSON file")
+  # --- low-and-slow / stealth options -----------------------------------
+  ap.add_argument("--stealth", action="store_true",
+          help="low-and-slow mode: rate-limit probes, jitter timing, "
+             "cross-host sweep order, browser-like User-Agent, minimal "
+             "probe paths. Reduces SOC/IDS rate-trigger noise but is NOT "
+             "wire stealth (still TCP-connect; auth attempts still log).")
+  ap.add_argument("--rate", type=float, default=0,
+          help="cap probes per second (0 = no limit). --stealth defaults this to 5.")
+  ap.add_argument("--jitter", type=float, default=0,
+          help="randomize timing by +/- this fraction (0..1). --stealth defaults to 0.4.")
+  ap.add_argument("--shuffle", action="store_true",
+          help="randomize host x port order (auto-on with --stealth)")
+  ap.add_argument("--user-agent", default=None,
+          help="custom HTTP/RTSP User-Agent string (overrides default and --stealth UA)")
   args = ap.parse_args()
+
+  # Apply stealth preset BEFORE anything else looks at the values.
+  if args.stealth:
+    if args.rate == 0: args.rate = 5
+    if args.jitter == 0: args.jitter = 0.4
+    args.shuffle = True
+    if args.workers == 200:  # only if user didn't override
+      args.workers = 5
+    if args.timeout == 1.5:
+      args.timeout = 4.0
+    ProbeConfig.stealth = True
+    ProbeConfig.http_paths = HTTP_PATHS_STEALTH
+    ProbeConfig.user_agent = args.user_agent or STEALTH_UA
+  else:
+    ProbeConfig.user_agent = args.user_agent or DEFAULT_UA
 
   try:
     host_count, hosts = parse_targets(args.range)
@@ -731,6 +804,13 @@ def main():
 
   ports = list(CAMERA_PORTS)
   total = host_count * len(ports)
+  if args.stealth or args.rate or args.shuffle:
+    eta = f", ~{total/args.rate:.0f}s minimum" if args.rate > 0 else ""
+    print(f"[*] stealth: rate={args.rate}/s jitter={args.jitter} "
+       f"workers={args.workers} shuffle={args.shuffle} "
+       f"UA='{ProbeConfig.user_agent[:40]}...'{eta}", file=sys.stderr)
+    print("[*] note: still TCP-connect (not wire-stealth); auth attempts "
+       "still produce log entries on targets", file=sys.stderr)
   print(f"[*] phase 1: port scan {host_count:,} host(s) x {len(ports)} camera "
      f"port(s) = {total:,} probes", file=sys.stderr)
   if total > args.max_probes and not args.yes:
@@ -739,8 +819,21 @@ def main():
     sys.exit(2)
 
   # Phase 1: find which camera ports are open per host (bounded streaming).
+  # Iteration order matters for stealth: sweeping (port, ip) instead of
+  # (ip, port) spreads probes across hosts so no single host sees a
+  # back-to-back port scan that would trigger per-source rate alarms.
   host_open = {} # ip(str) -> set(ports)
-  jobs = ((ip, port) for ip in hosts for port in ports)
+  if args.shuffle and total <= 200_000:
+    host_list = list(hosts)
+    random.shuffle(host_list)
+    port_list = list(ports); random.shuffle(port_list)
+    jobs = ((ip, port) for port in port_list for ip in host_list)
+  else:
+    # Streaming: port-major so back-to-back probes hit different hosts.
+    host_list = None
+    jobs = ((ip, port) for port in ports for ip in hosts)
+
+  limiter = RateLimiter(args.rate, args.jitter)
   in_flight = args.workers * 4
   prog1 = Progress(total, "scan ", enabled=not args.no_progress)
   with ThreadPoolExecutor(max_workers=args.workers) as pool:
@@ -760,6 +853,7 @@ def main():
           break
 
     for ip, port in jobs:
+      limiter.wait()
       pending[pool.submit(scan_port, ip, port, args.timeout)] = (ip, port)
       if len(pending) >= in_flight:
         drain(in_flight // 2)
@@ -773,10 +867,17 @@ def main():
   findings = []
   detected_live = 0
   prog2 = Progress(len(host_open), "ident", enabled=not args.no_progress)
-  with ThreadPoolExecutor(max_workers=min(args.workers, 100)) as pool:
-    futs = {pool.submit(fingerprint_host, ipaddress.ip_address(ip),
-              host_open[ip], args.timeout): ip
-        for ip in host_open}
+  ident_workers = min(args.workers, 5 if args.stealth else 100)
+  ident_hosts = list(host_open)
+  if args.shuffle:
+    random.shuffle(ident_hosts)
+  with ThreadPoolExecutor(max_workers=ident_workers) as pool:
+    futs = {}
+    for ip in ident_hosts:
+      limiter.wait()
+      fut = pool.submit(fingerprint_host, ipaddress.ip_address(ip),
+                host_open[ip], args.timeout)
+      futs[fut] = ip
     for fut in as_completed(futs):
       try:
         r = fut.result()
@@ -804,7 +905,8 @@ def main():
        f"lockout risk, authorized use only", file=sys.stderr)
     prog3 = Progress(len(detected), "creds", enabled=not args.no_progress)
     cracked_live = 0
-    with ThreadPoolExecutor(max_workers=min(args.workers, 30)) as pool:
+    cred_workers = min(args.workers, 3 if args.stealth else 30)
+    with ThreadPoolExecutor(max_workers=cred_workers) as pool:
       futs = {pool.submit(check_default_creds,
                 ipaddress.ip_address(f["ip"]), set(f["open_ports"]),
                 f["vendor"], args.timeout, creds,
