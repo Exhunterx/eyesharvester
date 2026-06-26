@@ -15,6 +15,10 @@ a single IP) and does two passes:
  Each host is classified into a device type (camera / dvr-nvr) with a vendor
  guess, a confidence level, and the concrete evidence behind the call.
 
+ A host is also flagged as surveillance if BOTH port 80 and port 554 are open,
+ even without any fingerprint evidence - this is the main classification
+ trigger and catches devices whose banners were silenced or unknown.
+
  Optional phase 3 (--check-creds) tests factory default credentials against
  the detected devices' web UIs (HTTP Basic/Digest), capped per host to limit
  lockouts. This is an active login attempt - authorized use only.
@@ -617,6 +621,10 @@ def classify(open_ports, evidence):
   speaks_onvif = "onvif:" in blob
   dvrip = [p for p in open_ports if p in DVRIP_PORTS]
   cam_webserver = [w for w in CAMERA_WEBSERVERS if w in blob]
+  # Web UI + RTSP both open is a strong surveillance signal by itself,
+  # even when neither port answered with a recognizable banner. This is the
+  # main classification trigger: 80 + 554 open => treat as camera/DVR/NVR.
+  web_rtsp_pair = 80 in open_ports and 554 in open_ports
 
   if speaks_rtsp:
     matched.append("rtsp")
@@ -626,6 +634,8 @@ def classify(open_ports, evidence):
     matched.append("dvrip-port:" + ",".join(str(p) for p in dvrip))
   if cam_webserver:
     matched.append("webserver:" + cam_webserver[0])
+  if web_rtsp_pair:
+    matched.append("ports:80+554")
 
   # Device type
   is_recorder = any(h in blob for h in RECORDER_HINTS) or bool(dvrip)
@@ -634,14 +644,14 @@ def classify(open_ports, evidence):
     dtype = "DVR/NVR"
   elif speaks_rtsp or speaks_onvif or is_camera:
     dtype = "IP camera"
-  elif dvrip or cam_webserver or vendor:
+  elif dvrip or cam_webserver or vendor or web_rtsp_pair:
     dtype = "DVR/NVR or camera"
   else:
     dtype = None # not surveillance
 
   # Confidence
   strong = bool(vendor) or speaks_onvif or bool(dvrip)
-  medium = speaks_rtsp or bool(cam_webserver)
+  medium = speaks_rtsp or bool(cam_webserver) or web_rtsp_pair
   if dtype is None:
     confidence = None
   elif strong:
