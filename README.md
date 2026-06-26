@@ -13,6 +13,42 @@ Single-file Python 3, standard library only, no dependencies.
 
 ---
 
+## Install
+
+**One-line install (Linux / macOS):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Exhunterx/eyesharvester/main/install.sh | bash
+```
+
+Installs to `~/.local/bin/eyesharvester` (per-user, no sudo). To install
+system-wide:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Exhunterx/eyesharvester/main/install.sh | sudo bash
+```
+
+Then run it from anywhere:
+
+```bash
+eyesharvester --help
+```
+
+**From a clone:**
+
+```bash
+git clone https://github.com/Exhunterx/eyesharvester.git
+cd eyesharvester
+./install.sh                       # install
+python3 eyesharvester.py --help    # or run directly without installing
+```
+
+Requires Python 3.8+. No dependencies.
+
+To uninstall: `rm ~/.local/bin/eyesharvester` (or `/usr/local/bin/eyesharvester`).
+
+---
+
 ## Features
 
 - **Any IP range format**: CIDR of any mask (`203.0.113.0/24`, `10.0.0.0/8`),
@@ -43,24 +79,12 @@ Single-file Python 3, standard library only, no dependencies.
 
 ---
 
-## Install
-
-```bash
-git clone <your-private-repo-url> eyesharvester
-cd eyesharvester
-python3 eyesharvester.py --help
-```
-
-Requires Python 3.8+. No dependencies.
-
----
-
 ## Usage
 
 ### Basic detection
 
 ```bash
-python3 eyesharvester.py 203.0.113.0/24
+eyesharvester 203.0.113.0/24
 ```
 
 Sample output:
@@ -75,13 +99,13 @@ Sample output:
 ### IPs only (pipe-friendly)
 
 ```bash
-python3 eyesharvester.py 203.0.113.0/24 -q > cameras.txt
+eyesharvester 203.0.113.0/24 -q > cameras.txt
 ```
 
 ### Confidence filter
 
 ```bash
-python3 eyesharvester.py 203.0.113.0/24 -c confirmed     # only rock-solid hits
+eyesharvester 203.0.113.0/24 -c confirmed     # only rock-solid hits
 ```
 
 ### Default-credential audit
@@ -89,19 +113,19 @@ python3 eyesharvester.py 203.0.113.0/24 -c confirmed     # only rock-solid hits
 Lockout-aware (3 attempts max per host, brand default tried first):
 
 ```bash
-python3 eyesharvester.py 203.0.113.0/24 --check-creds
+eyesharvester 203.0.113.0/24 --check-creds
 ```
 
 Throttle between attempts and use a custom wordlist:
 ```bash
-python3 eyesharvester.py 203.0.113.0/24 --check-creds \
+eyesharvester 203.0.113.0/24 --check-creds \
     --creds-file mylist.txt --cred-delay 1
 ```
 
 ### Hardening / CVE report
 
 ```bash
-python3 eyesharvester.py 203.0.113.0/24 --harden
+eyesharvester 203.0.113.0/24 --harden
 ```
 
 For each detected device prints reported firmware (best-effort), the known
@@ -112,7 +136,7 @@ severity, and remediation. A general hardening checklist is printed once.
 ### Full audit with JSON
 
 ```bash
-python3 eyesharvester.py 203.0.113.0/24 --check-creds --harden -oJ audit.json
+eyesharvester 203.0.113.0/24 --check-creds --harden -oJ audit.json
 ```
 
 ---
@@ -219,6 +243,14 @@ Default: human-readable report on stdout.
   each device's specific build against the vendor PSIRT before declaring it
   vulnerable.
 - No IPv6 yet.
+
+---
+
+## Contributing
+
+Pull requests welcome - especially for additional vendor signatures, default
+credentials, and CVE advisories. Please don't submit PoC exploit code; this
+project is defensive in scope.
 
 ---
 
