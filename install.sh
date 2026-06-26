@@ -35,13 +35,32 @@ warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
 # --- Python check ----------------------------------------------------------
-command -v python3 >/dev/null 2>&1 || die "python3 not found. Install Python 3.8+ first."
-PY_OK=$(python3 - <<'PY'
-import sys
-print("ok" if sys.version_info >= (3, 8) else "old")
-PY
-)
-[[ "$PY_OK" == "ok" ]] || die "Python 3.8+ required (found $(python3 -V))."
+# Try several candidate interpreters. Some systems have a broken /usr/bin/python3
+# (e.g. replaced by a venv-launcher wrapper whose venv has been removed), so we
+# verify each candidate actually runs a real Python sanity check.
+PY=""
+for cand in python3.12 python3.11 python3.10 python3.9 python3.8 python3 python; do
+  command -v "$cand" >/dev/null 2>&1 || continue
+  if ver=$("$cand" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null); then
+    major=${ver%.*}; minor=${ver#*.}
+    if [[ "$major" -ge 3 && "$minor" -ge 8 ]]; then
+      PY="$cand"; PY_VER="$ver"
+      break
+    fi
+  fi
+done
+if [[ -z "$PY" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    warn "python3 exists but is not a working Python 3.8+ interpreter."
+    warn "Sample output: $(python3 -V 2>&1 | head -1)"
+    warn "If you see a shell error like 'line N: .../python: No such file or directory',"
+    warn "your /usr/bin/python3 is a broken wrapper. Restore the real interpreter:"
+    warn "  sudo apt install --reinstall python3 python3-minimal     # Debian/Ubuntu"
+    warn "  sudo dnf reinstall python3                              # Fedora/RHEL"
+  fi
+  die "No working Python 3.8+ found. Install python3 (>=3.8) and re-run."
+fi
+say "Using $PY ($PY_VER)"
 
 # --- Locate or fetch eyesharvester.py --------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
@@ -75,8 +94,15 @@ case ":$PATH:" in
 esac
 
 # --- Verify ----------------------------------------------------------------
-if "$DEST" --help >/dev/null 2>&1; then
+# Invoke through $PY explicitly so a broken `#!/usr/bin/env python3` shebang
+# doesn't fool us when the interpreter we just validated isn't the default.
+if "$PY" "$DEST" --help >/dev/null 2>&1; then
   say "OK. Run: eyesharvester --help"
+  if [[ "$PY" != "python3" ]]; then
+    warn "Heads up: 'python3' on this system isn't $PY. The 'eyesharvester'"
+    warn "shortcut uses '#!/usr/bin/env python3' - if it fails, run it as:"
+    warn "    $PY $DEST --help"
+  fi
 else
-  die "Install completed but '$DEST --help' failed. Check Python install."
+  die "Install completed but '$PY $DEST --help' failed. Check Python install."
 fi
