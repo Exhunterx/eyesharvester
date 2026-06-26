@@ -1,4 +1,4 @@
-# eyesharvester
+# Eyesharvester
 
 A surveillance-device discovery tool for the **reconnaissance stage** of
 authorized security engagements (pentests, red-team ops, asset audits, CTF
